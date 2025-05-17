@@ -7,6 +7,8 @@ const path = require('path');
 const mongoose = require('mongoose');
 const MongoStore = require('connect-mongo');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const fs = require('fs-extra');
 require('dotenv').config();
 
 const app = express();
@@ -23,7 +25,18 @@ const userSchema = new mongoose.Schema({
   displayName: String,
   email: String,
   photo: String,
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  fullName: String,
+  phoneNumber: String,
+  drivingLicenseNumber: String,
+  aadharNumber: String,
+  dateOfBirth: Date,
+  address: String,
+  city: String,
+  state: String,
+  pincode: String,
+  profilePhoto: String,
+  drivingLicensePhoto: String
 });
 
 const User = mongoose.model('User', userSchema);
@@ -144,12 +157,25 @@ app.get('/auth/google',
 // Modify the Google callback route to return token
 app.get('/auth/google/callback',
   passport.authenticate('google', {
-    failureRedirect: 'http://localhost:5173/login',
+    failureRedirect: process.env.NODE_ENV === 'production'
+      ? 'https://truck-xddp.onrender.com/login'
+      : 'http://localhost:5173/login',
     failWithError: true
   }),
   (req, res) => {
+    console.log('Authentication successful, user:', req.user);
     const token = req.user.token;
-    res.redirect(`http://localhost:5173/dashboard?token=${token}`);
+    const redirectUrl = process.env.NODE_ENV === 'production'
+      ? `https://truck-xddp.onrender.com/dashboard?token=${token}`
+      : `http://localhost:5173/dashboard?token=${token}`;
+    res.redirect(redirectUrl);
+  },
+  (err, req, res, next) => {
+    console.error('Google authentication error:', err);
+    const errorRedirect = process.env.NODE_ENV === 'production'
+      ? 'https://truck-xddp.onrender.com/login'
+      : 'http://localhost:5173/login';
+    res.redirect(`${errorRedirect}?error=${encodeURIComponent(err.message)}`);
   }
 );
 
@@ -233,6 +259,195 @@ app.get('/auth/test', (req, res) => {
 
 // Create a static route for serving uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, 'uploads');
+fs.ensureDirSync(uploadsDir);
+
+// Configure multer storage
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadsDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
+});
+
+// Add route to update user details
+app.post('/api/user/details', verifyToken, upload.fields([
+  { name: 'profilePhoto', maxCount: 1 },
+  { name: 'drivingLicensePhoto', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      fullName,
+      phoneNumber,
+      drivingLicenseNumber,
+      aadharNumber,
+      dateOfBirth,
+      address,
+      city,
+      state,
+      pincode
+    } = req.body;
+
+    // Validate required fields
+    if (!fullName || !phoneNumber || !drivingLicenseNumber || !aadharNumber ||
+      !dateOfBirth || !address || !city || !state || !pincode) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Validate Aadhar number (12 digits)
+    if (!/^\d{12}$/.test(aadharNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Aadhar number'
+      });
+    }
+
+    // Validate phone number (10 digits)
+    if (!/^\d{10}$/.test(phoneNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid phone number'
+      });
+    }
+
+    // Validate pincode (6 digits)
+    if (!/^\d{6}$/.test(pincode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid pincode'
+      });
+    }
+
+    // Prepare update object
+    const updateData = {
+      fullName,
+      phoneNumber,
+      drivingLicenseNumber,
+      aadharNumber,
+      dateOfBirth: new Date(dateOfBirth),
+      address,
+      city,
+      state,
+      pincode
+    };
+
+    // Handle file uploads if present
+    if (req.files) {
+      if (req.files.profilePhoto) {
+        updateData.profilePhoto = `/uploads/${req.files.profilePhoto[0].filename}`;
+      }
+      if (req.files.drivingLicensePhoto) {
+        updateData.drivingLicensePhoto = `/uploads/${req.files.drivingLicensePhoto[0].filename}`;
+      }
+    }
+
+    // Update user in database
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'User details updated successfully',
+      user: updatedUser
+    });
+
+  } catch (error) {
+    console.error('Error updating user details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating user details',
+      error: error.message
+    });
+  }
+});
+
+// Add route to get user details
+app.get('/api/user/details', verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Find user by ID and select only the necessary fields
+    const user = await User.findById(userId).select({
+      fullName: 1,
+      email: 1,
+      phoneNumber: 1,
+      drivingLicenseNumber: 1,
+      aadharNumber: 1,
+      dateOfBirth: 1,
+      address: 1,
+      city: 1,
+      state: 1,
+      pincode: 1,
+      profilePhoto: 1,
+      drivingLicensePhoto: 1,
+      photo: 1, // Google profile photo if available
+      displayName: 1 // Google display name if available
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Format the response
+    const userDetails = {
+      success: true,
+      data: {
+        fullName: user.fullName,
+        email: user.email,
+        phoneNumber: user.phoneNumber,
+        drivingLicenseNumber: user.drivingLicenseNumber,
+        aadharNumber: user.aadharNumber,
+        dateOfBirth: user.dateOfBirth,
+        address: user.address,
+        city: user.city,
+        state: user.state,
+        pincode: user.pincode,
+        profilePhoto: user.profilePhoto || user.photo, // Use uploaded photo or Google photo
+        drivingLicensePhoto: user.drivingLicensePhoto,
+        displayName: user.displayName
+      }
+    };
+
+    res.json(userDetails);
+
+  } catch (error) {
+    console.error('Error fetching user details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching user details',
+      error: error.message
+    });
+  }
+});
 
 // Start server
 app.listen(PORT, () => {
