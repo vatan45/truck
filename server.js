@@ -288,24 +288,23 @@ const upload = multer({
   }
 });
 
-// Add route to update user details
-app.post('/api/user/details', verifyToken, upload.fields([
+// Add route to update user details (public version)
+app.post('/api/user/details', upload.fields([
   { name: 'profilePhoto', maxCount: 1 },
   { name: 'drivingLicensePhoto', maxCount: 1 }
 ]), async (req, res) => {
   try {
-    const userId = req.user.id;
-    const {
-      fullName,
-      phoneNumber,
-      drivingLicenseNumber,
-      aadharNumber,
-      dateOfBirth,
-      address,
-      city,
-      state,
-      pincode
-    } = req.body;
+    // Get userId from request body instead of req.user
+    const { userId, fullName, phoneNumber, drivingLicenseNumber, aadharNumber,
+      dateOfBirth, address, city, state, pincode } = req.body;
+
+    // Validate userId is provided
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
 
     // Validate required fields
     if (!fullName || !phoneNumber || !drivingLicenseNumber || !aadharNumber ||
@@ -481,6 +480,117 @@ app.get('/api/user/image/:userId/:imageType', async (req, res) => {
     res.send(imageData.data);
   } catch (error) {
     res.status(500).json({ message: 'Error serving image' });
+  }
+});
+
+// Add this route alongside your existing /api/user/details route
+app.post('/api/users/details', verifyToken, upload.fields([
+  { name: 'profilePhoto', maxCount: 1 },
+  { name: 'drivingLicensePhoto', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const {
+      fullName,
+      phoneNumber,
+      drivingLicenseNumber,
+      aadharNumber,
+      dateOfBirth,
+      address,
+      city,
+      state,
+      pincode
+    } = req.body;
+
+    // Validate required fields
+    if (!fullName || !phoneNumber || !drivingLicenseNumber || !aadharNumber ||
+      !dateOfBirth || !address || !city || !state || !pincode) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+
+    // Validate Aadhar number (12 digits)
+    if (!/^\d{12}$/.test(aadharNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Aadhar number'
+      });
+    }
+
+    // Validate phone number (10 digits)
+    if (!/^\d{10}$/.test(phoneNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid phone number'
+      });
+    }
+
+    // Validate pincode (6 digits)
+    if (!/^\d{6}$/.test(pincode)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid pincode'
+      });
+    }
+
+    // Prepare update object
+    const updateData = {
+      fullName,
+      phoneNumber,
+      drivingLicenseNumber,
+      aadharNumber,
+      dateOfBirth: new Date(dateOfBirth),
+      address,
+      city,
+      state,
+      pincode
+    };
+
+    // Handle file uploads if present
+    if (req.files) {
+      if (req.files.profilePhoto) {
+        updateData.profilePhoto = {
+          data: req.files.profilePhoto[0].buffer,
+          contentType: req.files.profilePhoto[0].mimetype
+        };
+      }
+      if (req.files.drivingLicensePhoto) {
+        updateData.drivingLicensePhoto = {
+          data: req.files.drivingLicensePhoto[0].buffer,
+          contentType: req.files.drivingLicensePhoto[0].mimetype
+        };
+      }
+    }
+
+    // Update user in database
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'User details updated successfully',
+      user: updatedUser
+    });
+
+  } catch (error) {
+    console.error('Error updating user details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating user details',
+      error: error.message
+    });
   }
 });
 
