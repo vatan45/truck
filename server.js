@@ -5,6 +5,7 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
+const MongoStore = require('connect-mongo');
 require('dotenv').config();
 
 const app = express();
@@ -42,8 +43,12 @@ app.use(cors({
 
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your_secret_key',
-  resave: true,
-  saveUninitialized: true,
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/your_database_name',
+    ttl: 24 * 60 * 60 // 1 day
+  }),
   cookie: {
     secure: process.env.NODE_ENV === 'production',
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
@@ -115,7 +120,7 @@ app.get('/auth/google',
     console.log('Starting Google authentication flow');
     next();
   },
-  passport.authenticatauthenticatee('google', {
+  passport.authenticate('google', {
     scope: ['profile', 'email'],
     prompt: 'select_account'
   })
