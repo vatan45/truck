@@ -35,8 +35,14 @@ const userSchema = new mongoose.Schema({
   city: String,
   state: String,
   pincode: String,
-  profilePhoto: String,
-  drivingLicensePhoto: String
+  profilePhoto: {
+    data: Buffer,
+    contentType: String
+  },
+  drivingLicensePhoto: {
+    data: Buffer,
+    contentType: String
+  }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -276,7 +282,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
-  storage: storage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
   }
@@ -350,10 +356,16 @@ app.post('/api/user/details', verifyToken, upload.fields([
     // Handle file uploads if present
     if (req.files) {
       if (req.files.profilePhoto) {
-        updateData.profilePhoto = `/uploads/${req.files.profilePhoto[0].filename}`;
+        updateData.profilePhoto = {
+          data: req.files.profilePhoto[0].buffer,
+          contentType: req.files.profilePhoto[0].mimetype
+        };
       }
       if (req.files.drivingLicensePhoto) {
-        updateData.drivingLicensePhoto = `/uploads/${req.files.drivingLicensePhoto[0].filename}`;
+        updateData.drivingLicensePhoto = {
+          data: req.files.drivingLicensePhoto[0].buffer,
+          contentType: req.files.drivingLicensePhoto[0].mimetype
+        };
       }
     }
 
@@ -446,6 +458,29 @@ app.get('/api/user/details', verifyToken, async (req, res) => {
       message: 'Error fetching user details',
       error: error.message
     });
+  }
+});
+
+// Add a route to serve images from MongoDB
+app.get('/api/user/image/:userId/:imageType', async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const imageData = req.params.imageType === 'profile'
+      ? user.profilePhoto
+      : user.drivingLicensePhoto;
+
+    if (!imageData || !imageData.data) {
+      return res.status(404).json({ message: 'Image not found' });
+    }
+
+    res.set('Content-Type', imageData.contentType);
+    res.send(imageData.data);
+  } catch (error) {
+    res.status(500).json({ message: 'Error serving image' });
   }
 });
 
