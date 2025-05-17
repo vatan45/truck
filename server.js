@@ -399,9 +399,16 @@ app.post('/api/user/details', upload.fields([
 });
 
 // Add route to get user details
-app.get('/api/user/details', verifyToken, async (req, res) => {
+app.get('/api/user/details', async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.query.userId; // Get userId from query parameter
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
 
     // Find user by ID and select only the necessary fields
     const user = await User.findById(userId).select({
