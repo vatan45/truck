@@ -6,6 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const mongoose = require('mongoose');
 const MongoStore = require('connect-mongo');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
@@ -80,7 +81,10 @@ passport.deserializeUser(async (id, done) => {
   }
 });
 
-// Google OAuth Strategy with explicit credentials
+// Add JWT secret key to environment variables
+const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-key';
+
+// Modify the Google OAuth Strategy to use JWT
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
@@ -91,11 +95,9 @@ passport.use(new GoogleStrategy({
       console.log('Google authentication successful');
       console.log('Profile:', profile.displayName);
 
-      // Check if user exists
       let user = await User.findOne({ googleId: profile.id });
 
       if (!user) {
-        // Create new user
         user = await User.create({
           googleId: profile.id,
           displayName: profile.displayName,
@@ -107,6 +109,19 @@ passport.use(new GoogleStrategy({
         console.log('Existing user found:', user.displayName);
       }
 
+      // Generate JWT token
+      const token = jwt.sign(
+        {
+          id: user._id,
+          email: user.email,
+          displayName: user.displayName
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      // Attach token to user object
+      user.token = token;
       return done(null, user);
     } catch (err) {
       return done(err);
@@ -126,6 +141,7 @@ app.get('/auth/google',
   })
 );
 
+// Modify the Google callback route to return token
 app.get('/auth/google/callback',
   passport.authenticate('google', {
     failureRedirect: 'http://localhost:5173/login',
@@ -134,14 +150,9 @@ app.get('/auth/google/callback',
   (req, res) => {
     console.log('Authentication successful, user:', req.user);
 
-    // Explicitly save the session
-    req.session.save((err) => {
-      if (err) {
-        console.error('Error saving session:', err);
-      }
-      console.log('Session saved, redirecting to dashboard');
-      res.redirect('http://localhost:5173/dashboard');
-    });
+    // Redirect with token as query parameter
+    const token = req.user.token;
+    res.redirect(`http://localhost:5173/dashboard?token=${token}`);
   },
   (err, req, res, next) => {
     console.error('Google authentication error:', err);
@@ -149,29 +160,32 @@ app.get('/auth/google/callback',
   }
 );
 
-// Get current user
-app.get('/auth/user', (req, res) => {
-  console.log('User authentication check:', req.isAuthenticated());
-  if (req.isAuthenticated()) {
-    res.json(req.user);
-  } else {
-    res.status(401).json({ message: 'Not authenticated' });
+// Add middleware to verify JWT token
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ message: 'No token provided' });
   }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+// Modify the user route to use token verification
+app.get('/auth/user', verifyToken, (req, res) => {
+  res.json(req.user);
 });
 
-// Logout
-app.get('/auth/logout', (req, res) => {
-  req.logout(function (err) {
-    if (err) { return next(err); }
-    res.json({ success: true });
-  });
-});
-
-// Basic login route for email/password
-app.post('/auth/login', (req, res) => {
+// Modify the login route to use JWT
+app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
 
-  // Simple validation
   if (!email || !password) {
     return res.status(400).json({ success: false, message: 'Email and password are required' });
   }
@@ -184,16 +198,32 @@ app.post('/auth/login', (req, res) => {
       displayName: 'Test User'
     };
 
-    // Log in the user
-    req.login(user, (err) => {
-      if (err) {
-        return res.status(500).json({ success: false, message: 'Error logging in' });
-      }
-      return res.json({ success: true, user });
+    // Generate JWT token
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        displayName: user.displayName
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    return res.json({
+      success: true,
+      user,
+      token
     });
   } else {
     return res.status(401).json({ success: false, message: 'Invalid credentials' });
   }
+});
+
+// Modify logout to be token-based
+app.post('/auth/logout', verifyToken, (req, res) => {
+  // Since we're using JWT, we don't need to do anything server-side
+  // The client should remove the token from localStorage
+  res.json({ success: true });
 });
 
 // Add a test route to check authentication
