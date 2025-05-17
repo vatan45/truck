@@ -9,6 +9,8 @@ const MongoStore = require('connect-mongo');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const fs = require('fs-extra');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -46,6 +48,144 @@ const userSchema = new mongoose.Schema({
 });
 
 const User = mongoose.model('User', userSchema);
+
+// First, let's create a Policy Schema
+const policySchema = new mongoose.Schema({
+  policyName: {
+    type: String,
+    required: true
+  },
+  policyType: {
+    type: String,
+    required: true,
+    enum: ['Comprehensive', 'Third Party', 'Liability', 'Personal Accident']
+  },
+  description: {
+    type: String,
+    required: true
+  },
+  coverage: {
+    type: String,
+    required: true
+  },
+  premium: {
+    type: Number,
+    required: true
+  },
+  duration: {
+    type: Number,
+    required: true,
+    comment: 'Duration in months'
+  },
+  features: [{
+    type: String
+  }],
+  termsAndConditions: [{
+    type: String
+  }],
+  isActive: {
+    type: Boolean,
+    default: true
+  }
+});
+
+const Policy = mongoose.model('Policy', policySchema);
+
+// Create a Purchase Schema to track policy purchases
+const purchaseSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true
+  },
+  policyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Policy',
+    required: true
+  },
+  purchaseDate: {
+    type: Date,
+    default: Date.now
+  },
+  startDate: {
+    type: Date,
+    required: true
+  },
+  endDate: {
+    type: Date,
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['Active', 'Expired', 'Cancelled'],
+    default: 'Active'
+  },
+  paymentStatus: {
+    type: String,
+    enum: ['Pending', 'Completed', 'Failed'],
+    default: 'Pending'
+  },
+  paymentDetails: {
+    amount: Number,
+    transactionId: String,
+    paymentDate: Date
+  }
+});
+
+const Purchase = mongoose.model('Purchase', purchaseSchema);
+
+// Initialize Razorpay
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET
+});
+
+// Payment Schema
+const paymentSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true
+  },
+  policyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Policy'
+  },
+  loanId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Loan'
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  currency: {
+    type: String,
+    default: 'INR'
+  },
+  razorpayOrderId: String,
+  razorpayPaymentId: String,
+  razorpaySignature: String,
+  status: {
+    type: String,
+    enum: ['Pending', 'Completed', 'Failed', 'Refunded'],
+    default: 'Pending'
+  },
+  paymentType: {
+    type: String,
+    enum: ['Policy', 'Loan', 'Renewal'],
+    required: true
+  },
+  paymentDate: {
+    type: Date,
+    default: Date.now
+  },
+  dueDate: Date,
+  reminderSent: {
+    type: Boolean,
+    default: false
+  }
+});
+
+const Payment = mongoose.model('Payment', paymentSchema);
 
 // Debug environment variables
 console.log('Environment check:');
@@ -596,6 +736,829 @@ app.post('/api/users/details', verifyToken, upload.fields([
     res.status(500).json({
       success: false,
       message: 'Error updating user details',
+      error: error.message
+    });
+  }
+});
+
+// API Routes for Policies
+
+// 1. Get all available policies
+app.get('/api/policies', async (req, res) => {
+  try {
+    const policies = await Policy.find({ isActive: true })
+      .select('policyName policyType description premium duration features');
+
+    res.json({
+      success: true,
+      data: policies
+    });
+  } catch (error) {
+    console.error('Error fetching policies:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching policies',
+      error: error.message
+    });
+  }
+});
+
+// 2. Get detailed information about a specific policy
+app.get('/api/policies/:policyId', async (req, res) => {
+  try {
+    const policy = await Policy.findById(req.params.policyId);
+
+    if (!policy) {
+      return res.status(404).json({
+        success: false,
+        message: 'Policy not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: policy
+    });
+  } catch (error) {
+    console.error('Error fetching policy details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching policy details',
+      error: error.message
+    });
+  }
+});
+
+// 3. Purchase a policy
+app.post('/api/policies/purchase', async (req, res) => {
+  try {
+    const { policyId, startDate, userId } = req.body;
+
+    // Validate required fields
+    if (!policyId || !startDate || !userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Policy ID, start date, and user ID are required'
+      });
+    }
+
+    // Validate policy exists
+    const policy = await Policy.findById(policyId);
+    if (!policy) {
+      return res.status(404).json({
+        success: false,
+        message: 'Policy not found'
+      });
+    }
+
+    // Calculate end date based on policy duration
+    const endDate = new Date(startDate);
+    endDate.setMonth(endDate.getMonth() + policy.duration);
+
+    // Create purchase record
+    const purchase = new Purchase({
+      userId,
+      policyId,
+      startDate,
+      endDate,
+      paymentDetails: {
+        amount: policy.premium
+      }
+    });
+
+    await purchase.save();
+
+    res.json({
+      success: true,
+      message: 'Policy purchase initiated successfully',
+      data: {
+        purchaseId: purchase._id,
+        policyDetails: {
+          name: policy.policyName,
+          type: policy.policyType,
+          premium: policy.premium,
+          duration: policy.duration
+        },
+        startDate: purchase.startDate,
+        endDate: purchase.endDate
+      }
+    });
+  } catch (error) {
+    console.error('Error purchasing policy:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error purchasing policy',
+      error: error.message
+    });
+  }
+});
+
+// 4. Get user's purchased policies
+app.get('/api/policies/user/purchases', async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
+
+    const purchases = await Purchase.find({ userId })
+      .populate('policyId', 'policyName policyType premium duration')
+      .sort({ purchaseDate: -1 });
+
+    res.json({
+      success: true,
+      data: purchases
+    });
+  } catch (error) {
+    console.error('Error fetching user purchases:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching user purchases',
+      error: error.message
+    });
+  }
+});
+
+// 5. Update payment status for a purchase
+app.patch('/api/policies/purchase/:purchaseId/payment', async (req, res) => {
+  try {
+    const { purchaseId } = req.params;
+    const { paymentStatus, transactionId, userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required'
+      });
+    }
+
+    const purchase = await Purchase.findById(purchaseId);
+
+    if (!purchase) {
+      return res.status(404).json({
+        success: false,
+        message: 'Purchase not found'
+      });
+    }
+
+    // Verify the purchase belongs to the user
+    if (purchase.userId !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized access'
+      });
+    }
+
+    purchase.paymentStatus = paymentStatus;
+    if (transactionId) {
+      purchase.paymentDetails.transactionId = transactionId;
+      purchase.paymentDetails.paymentDate = new Date();
+    }
+
+    await purchase.save();
+
+    res.json({
+      success: true,
+      message: 'Payment status updated successfully',
+      data: purchase
+    });
+  } catch (error) {
+    console.error('Error updating payment status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating payment status',
+      error: error.message
+    });
+  }
+});
+
+// 1. My Account APIs
+app.get('/api/account/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Get user details
+    const user = await User.findById(userId).select('-profilePhoto.data -drivingLicensePhoto.data');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get active policies count
+    const activePolicies = await Purchase.countDocuments({
+      userId,
+      status: 'Active',
+      paymentStatus: 'Completed'
+    });
+
+    // Get total premium amount
+    const totalPremium = await Purchase.aggregate([
+      { $match: { userId, paymentStatus: 'Completed' } },
+      {
+        $lookup: {
+          from: 'policies',
+          localField: 'policyId',
+          foreignField: '_id',
+          as: 'policy'
+        }
+      },
+      { $unwind: '$policy' },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$policy.premium' }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        userDetails: user,
+        accountSummary: {
+          activePolicies,
+          totalPremium: totalPremium[0]?.total || 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching account details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching account details',
+      error: error.message
+    });
+  }
+});
+
+// 2. My Policies APIs
+app.get('/api/account/:userId/policies', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { status } = req.query; // Optional filter by status
+
+    const query = { userId };
+    if (status) {
+      query.status = status;
+    }
+
+    const policies = await Purchase.find(query)
+      .populate('policyId')
+      .sort({ purchaseDate: -1 });
+
+    res.json({
+      success: true,
+      data: policies
+    });
+  } catch (error) {
+    console.error('Error fetching user policies:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching user policies',
+      error: error.message
+    });
+  }
+});
+
+// 3. Help/Support Section APIs
+// First, create a Support Ticket Schema
+const supportTicketSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true
+  },
+  subject: {
+    type: String,
+    required: true
+  },
+  description: {
+    type: String,
+    required: true
+  },
+  category: {
+    type: String,
+    enum: ['Policy', 'Payment', 'Technical', 'Other'],
+    required: true
+  },
+  status: {
+    type: String,
+    enum: ['Open', 'In Progress', 'Resolved', 'Closed'],
+    default: 'Open'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  responses: [{
+    message: String,
+    responder: String,
+    timestamp: {
+      type: Date,
+      default: Date.now
+    }
+  }]
+});
+
+const SupportTicket = mongoose.model('SupportTicket', supportTicketSchema);
+
+// Create support ticket
+app.post('/api/support/tickets', async (req, res) => {
+  try {
+    const { userId, subject, description, category } = req.body;
+
+    const ticket = new SupportTicket({
+      userId,
+      subject,
+      description,
+      category
+    });
+
+    await ticket.save();
+
+    res.json({
+      success: true,
+      message: 'Support ticket created successfully',
+      data: ticket
+    });
+  } catch (error) {
+    console.error('Error creating support ticket:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating support ticket',
+      error: error.message
+    });
+  }
+});
+
+// Get user's support tickets
+app.get('/api/support/tickets/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const tickets = await SupportTicket.find({ userId })
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: tickets
+    });
+  } catch (error) {
+    console.error('Error fetching support tickets:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching support tickets',
+      error: error.message
+    });
+  }
+});
+
+// 4. Loan Detail APIs
+// First, create a Loan Schema
+const loanSchema = new mongoose.Schema({
+  userId: {
+    type: String,
+    required: true
+  },
+  policyId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Policy',
+    required: true
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  interestRate: {
+    type: Number,
+    required: true
+  },
+  term: {
+    type: Number,
+    required: true,
+    comment: 'Term in months'
+  },
+  status: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Rejected', 'Active', 'Paid'],
+    default: 'Pending'
+  },
+  startDate: Date,
+  endDate: Date,
+  monthlyPayment: Number,
+  remainingAmount: Number,
+  paymentHistory: [{
+    amount: Number,
+    date: Date,
+    status: String
+  }]
+});
+
+const Loan = mongoose.model('Loan', loanSchema);
+
+// Get loan details
+app.get('/api/loans/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const loans = await Loan.find({ userId })
+      .populate('policyId')
+      .sort({ startDate: -1 });
+
+    res.json({
+      success: true,
+      data: loans
+    });
+  } catch (error) {
+    console.error('Error fetching loan details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching loan details',
+      error: error.message
+    });
+  }
+});
+
+// Apply for a loan
+app.post('/api/loans/apply', async (req, res) => {
+  try {
+    const { userId, policyId, amount, term } = req.body;
+
+    // Calculate interest rate (example: 8% per annum)
+    const interestRate = 8;
+    const monthlyRate = interestRate / 12 / 100;
+    const monthlyPayment = (amount * monthlyRate * Math.pow(1 + monthlyRate, term)) /
+      (Math.pow(1 + monthlyRate, term) - 1);
+
+    const loan = new Loan({
+      userId,
+      policyId,
+      amount,
+      interestRate,
+      term,
+      monthlyPayment,
+      remainingAmount: amount,
+      startDate: new Date()
+    });
+
+    await loan.save();
+
+    res.json({
+      success: true,
+      message: 'Loan application submitted successfully',
+      data: loan
+    });
+  } catch (error) {
+    console.error('Error applying for loan:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error applying for loan',
+      error: error.message
+    });
+  }
+});
+
+// 5. Profile Details APIs
+app.get('/api/profile/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId)
+      .select('-profilePhoto.data -drivingLicensePhoto.data');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get user's active policies count
+    const activePolicies = await Purchase.countDocuments({
+      userId,
+      status: 'Active',
+      paymentStatus: 'Completed'
+    });
+
+    // Get user's active loans
+    const activeLoans = await Loan.countDocuments({
+      userId,
+      status: 'Active'
+    });
+
+    res.json({
+      success: true,
+      data: {
+        userDetails: user,
+        statistics: {
+          activePolicies,
+          activeLoans
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching profile details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching profile details',
+      error: error.message
+    });
+  }
+});
+
+// 1. First Payment Setup API
+app.post('/api/payments/setup', async (req, res) => {
+  try {
+    const { userId, policyId, amount, paymentType } = req.body;
+
+    // Create Razorpay Order
+    const options = {
+      amount: amount * 100, // Razorpay expects amount in paise
+      currency: 'INR',
+      receipt: `receipt_${Date.now()}`,
+      notes: {
+        userId,
+        policyId,
+        paymentType
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    // Create payment record
+    const payment = new Payment({
+      userId,
+      policyId,
+      amount,
+      razorpayOrderId: order.id,
+      paymentType,
+      dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours from now
+    });
+
+    await payment.save();
+
+    res.json({
+      success: true,
+      message: 'Payment setup successful',
+      data: {
+        orderId: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        paymentId: payment._id
+      }
+    });
+  } catch (error) {
+    console.error('Error setting up payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error setting up payment',
+      error: error.message
+    });
+  }
+});
+
+// 2. Verify and Complete Payment
+app.post('/api/payments/verify', async (req, res) => {
+  try {
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      paymentId
+    } = req.body;
+
+    // Verify signature
+    const generatedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+      .digest('hex');
+
+    if (generatedSignature !== razorpaySignature) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid payment signature'
+      });
+    }
+
+    // Update payment record
+    const payment = await Payment.findById(paymentId);
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment record not found'
+      });
+    }
+
+    payment.razorpayPaymentId = razorpayPaymentId;
+    payment.razorpaySignature = razorpaySignature;
+    payment.status = 'Completed';
+    await payment.save();
+
+    // Update related records based on payment type
+    if (payment.paymentType === 'Policy') {
+      await Purchase.findByIdAndUpdate(payment.policyId, {
+        paymentStatus: 'Completed',
+        'paymentDetails.transactionId': razorpayPaymentId,
+        'paymentDetails.paymentDate': new Date()
+      });
+    } else if (payment.paymentType === 'Loan') {
+      await Loan.findByIdAndUpdate(payment.loanId, {
+        $push: {
+          paymentHistory: {
+            amount: payment.amount,
+            date: new Date(),
+            status: 'Completed'
+          }
+        },
+        $inc: { remainingAmount: -payment.amount }
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Payment verified and completed successfully',
+      data: payment
+    });
+  } catch (error) {
+    console.error('Error verifying payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying payment',
+      error: error.message
+    });
+  }
+});
+
+// 3. Monthly Payment System
+app.post('/api/payments/monthly', async (req, res) => {
+  try {
+    const { userId, policyId, amount } = req.body;
+
+    // Create Razorpay Order for monthly payment
+    const options = {
+      amount: amount * 100,
+      currency: 'INR',
+      receipt: `monthly_${Date.now()}`,
+      notes: {
+        userId,
+        policyId,
+        paymentType: 'Monthly'
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+
+    // Create payment record
+    const payment = new Payment({
+      userId,
+      policyId,
+      amount,
+      razorpayOrderId: order.id,
+      paymentType: 'Policy',
+      dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000)
+    });
+
+    await payment.save();
+
+    res.json({
+      success: true,
+      message: 'Monthly payment setup successful',
+      data: {
+        orderId: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        paymentId: payment._id
+      }
+    });
+  } catch (error) {
+    console.error('Error setting up monthly payment:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error setting up monthly payment',
+      error: error.message
+    });
+  }
+});
+
+// 4. Payment Reminders
+app.get('/api/payments/reminders', async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    // Find pending payments that are due
+    const duePayments = await Payment.find({
+      userId,
+      status: 'Pending',
+      dueDate: { $lte: new Date() },
+      reminderSent: false
+    }).populate('policyId', 'policyName');
+
+    // Update reminder status
+    await Payment.updateMany(
+      { _id: { $in: duePayments.map(p => p._id) } },
+      { $set: { reminderSent: true } }
+    );
+
+    res.json({
+      success: true,
+      data: duePayments
+    });
+  } catch (error) {
+    console.error('Error fetching payment reminders:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching payment reminders',
+      error: error.message
+    });
+  }
+});
+
+// 5. Full Payment History
+app.get('/api/payments/history', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const { startDate, endDate, status, paymentType } = req.query;
+
+    // Build query
+    const query = { userId };
+    if (startDate && endDate) {
+      query.paymentDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    }
+    if (status) query.status = status;
+    if (paymentType) query.paymentType = paymentType;
+
+    const payments = await Payment.find(query)
+      .populate('policyId', 'policyName')
+      .populate('loanId')
+      .sort({ paymentDate: -1 });
+
+    // Calculate summary
+    const summary = await Payment.aggregate([
+      { $match: { userId } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+          totalAmount: { $sum: '$amount' }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        payments,
+        summary: summary.reduce((acc, curr) => {
+          acc[curr._id] = {
+            count: curr.count,
+            totalAmount: curr.totalAmount
+          };
+          return acc;
+        }, {})
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching payment history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching payment history',
+      error: error.message
+    });
+  }
+});
+
+// 6. Get Payment Details
+app.get('/api/payments/:paymentId', async (req, res) => {
+  try {
+    const { paymentId } = req.params;
+
+    const payment = await Payment.findById(paymentId)
+      .populate('policyId', 'policyName')
+      .populate('loanId');
+
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Payment not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: payment
+    });
+  } catch (error) {
+    console.error('Error fetching payment details:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching payment details',
       error: error.message
     });
   }
