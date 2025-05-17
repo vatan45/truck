@@ -34,17 +34,20 @@ console.log('Client Secret available:', !!process.env.GOOGLE_CLIENT_SECRET);
 // Middleware
 app.use(express.json());
 app.use(cors({
-  origin: 'http://localhost:5173', // Your React app's URL
+  origin: process.env.NODE_ENV === 'production'
+    ? ['https://truck-xddp.onrender.com', 'http://localhost:5173']
+    : 'http://localhost:5173',
   credentials: true
 }));
 
 app.use(session({
-  secret: 'your_secret_key',
+  secret: process.env.SESSION_SECRET || 'your_secret_key',
   resave: true,
   saveUninitialized: true,
   cookie: {
-    secure: false,
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
   }
 }));
 
@@ -112,7 +115,7 @@ app.get('/auth/google',
     console.log('Starting Google authentication flow');
     next();
   },
-  passport.authenticate('google', {
+  passport.authenticatauthenticatee('google', {
     scope: ['profile', 'email'],
     prompt: 'select_account'
   })
