@@ -148,15 +148,8 @@ app.get('/auth/google/callback',
     failWithError: true
   }),
   (req, res) => {
-    console.log('Authentication successful, user:', req.user);
-
-    // Redirect with token as query parameter
     const token = req.user.token;
     res.redirect(`http://localhost:5173/dashboard?token=${token}`);
-  },
-  (err, req, res, next) => {
-    console.error('Google authentication error:', err);
-    res.redirect('http://localhost:5173/login?error=' + encodeURIComponent(err.message));
   }
 );
 
